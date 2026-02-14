@@ -200,14 +200,14 @@ async function exportCSV() {
         // Extract filename from header
         const disposition = res.headers.get('Content-Disposition');
         const match = disposition && disposition.match(/filename="?(.+?)"?$/);
-        a.download = match ? match[1] : `contatos_${selectedGroupName.replace(/[^a-zA-Z0-9]/g, '_')}.csv`;
+        a.download = match ? match[1] : `contatos_${selectedGroupName.replace(/[^a-zA-Z0-9]/g, '_')}.xlsx`;
 
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        showToast(`CSV exportado com ${currentContacts.length} contatos!`, 'success');
+        showToast(`Planilha exportada com ${currentContacts.length} contatos!`, 'success');
     } catch (err) {
         showToast('Erro ao exportar: ' + err.message, 'error');
     } finally {

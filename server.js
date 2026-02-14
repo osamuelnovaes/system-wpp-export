@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
 const path = require('path');
+const XLSX = require('xlsx');
 
 const app = express();
 const server = http.createServer(app);
@@ -11,7 +12,7 @@ const io = new Server(server, {
   cors: { origin: '*' }
 });
 
-const PORT = process.env.PORT || 1998;
+const PORT = process.env.PORT || 8000;
 
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -25,22 +26,39 @@ let clientInfo = null;
 let lastQR = null;
 
 function createWhatsAppClient() {
+  // Build Puppeteer options
+  const puppeteerOptions = {
+    headless: true,
+    protocolTimeout: 300000,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--single-process',
+      '--disable-software-rasterizer',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--metrics-recording-only',
+      '--no-zygote',
+      '--js-flags=--max-old-space-size=256'
+    ]
+  };
+
+  // Use system Chromium if CHROME_PATH is set (Docker/production)
+  if (process.env.CHROME_PATH) {
+    puppeteerOptions.executablePath = process.env.CHROME_PATH;
+    console.log('🔧 Usando Chrome do sistema:', process.env.CHROME_PATH);
+  }
+
   const client = new Client({
     authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
-    puppeteer: {
-      headless: true,
-      executablePath: '/Users/samuelnovaes/.cache/puppeteer/chrome/mac_arm-145.0.7632.46/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-      protocolTimeout: 300000,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--disable-gpu',
-        '--disable-extensions'
-      ]
-    }
+    puppeteer: puppeteerOptions
   });
 
   client.on('qr', async (qr) => {
@@ -139,14 +157,14 @@ async function getGroupsWithRetry(maxRetries = 5) {
       // If no groups found and we have more retries, wait and try again
       if (attempt < maxRetries) {
         const delay = attempt * 3000; // 3s, 6s, 9s, 12s, 15s
-        console.log(`⏳ Nenhum grupo encontrado, aguardando ${delay/1000}s para nova tentativa...`);
+        console.log(`⏳ Nenhum grupo encontrado, aguardando ${delay / 1000}s para nova tentativa...`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     } catch (err) {
       console.error(`❌ Erro na tentativa ${attempt}:`, err.message);
       if (attempt < maxRetries) {
         const delay = attempt * 3000;
-        console.log(`⏳ Aguardando ${delay/1000}s para nova tentativa...`);
+        console.log(`⏳ Aguardando ${delay / 1000}s para nova tentativa...`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -333,6 +351,11 @@ function requireWhatsApp(req, res, next) {
   next();
 }
 
+// Health check endpoint for Koyeb
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
 app.get('/api/status', (req, res) => {
   res.json({
     connected: isClientReady,
@@ -451,7 +474,7 @@ app.get('/api/groups/:id/contacts', requireWhatsApp, async (req, res) => {
   }
 });
 
-// GET /api/groups/:id/export - Export contacts as CSV
+// GET /api/groups/:id/export - Export contacts as XLSX (Excel)
 app.get('/api/groups/:id/export', requireWhatsApp, async (req, res) => {
   try {
     const chatId = req.params.id;
@@ -461,25 +484,41 @@ app.get('/api/groups/:id/export', requireWhatsApp, async (req, res) => {
       return res.status(404).json({ error: 'Grupo não encontrado' });
     }
 
-    const rows = [];
-    rows.push('Nome,Telefone,Grupo,Admin');
+    const groupName = data.name || 'Grupo';
 
-    for (const p of (data.participants || [])) {
-      const name = (p.name || '').replace(/,/g, ' ').replace(/"/g, '');
-      const phone = p.phoneFormatted;
-      const groupName = (data.name || 'Grupo').replace(/"/g, '');
-      const isAdmin = p.isAdmin ? 'Sim' : 'Não';
-      rows.push(`"${name}","${phone}","${groupName}","${isAdmin}"`);
-    }
+    // Build rows for the spreadsheet
+    const rows = (data.participants || []).map(p => ({
+      'Nome': p.name || '',
+      'Telefone': p.phoneFormatted,
+      'Grupo': groupName,
+      'Admin': p.isSuperAdmin ? 'Criador' : p.isAdmin ? 'Sim' : 'Não'
+    }));
 
-    const csv = rows.join('\n');
-    const safeName = (data.name || 'grupo').replace(/[^a-zA-Z0-9]/g, '_');
-    const filename = `contatos_${safeName}_${Date.now()}.csv`;
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
 
-    const bom = '\uFEFF';
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(bom + csv);
+    // Auto-fit column widths
+    const maxNameLen = rows.reduce((max, r) => Math.max(max, (r['Nome'] || '').length), 0);
+    const colWidths = [
+      { wch: Math.max(20, maxNameLen) },
+      { wch: 18 },
+      { wch: Math.max(15, groupName.length + 2) },
+      { wch: 10 }
+    ];
+    ws['!cols'] = colWidths;
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Contatos');
+
+    // Generate buffer
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    const safeName = groupName.replace(/[^a-zA-Z0-9 ]/g, '_').trim();
+    const filename = 'contatos_' + safeName + '_' + Date.now() + '.xlsx';
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
+    res.send(Buffer.from(buf));
   } catch (err) {
     console.error('❌ Erro ao exportar contatos:', err.message);
     res.status(500).json({ error: 'Erro ao exportar contatos' });

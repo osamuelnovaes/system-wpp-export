@@ -1,0 +1,9 @@
+node_modules/
+.wwebjs_auth/
+.wwebjs_cache/
+.git/
+.gitignore
+.DS_Store
+*.log
+_fix_export.js
+DEPLOY.md
